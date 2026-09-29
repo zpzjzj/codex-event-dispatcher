@@ -1,0 +1,15 @@
+{
+  "repositories": {
+    "OWNER/REPO": "/absolute/path/to/checkout"
+  },
+  "ignore_authors": ["YOUR_GITHUB_LOGIN"],
+  "database": "/absolute/path/to/private-state/github-codex-controller.sqlite3",
+  "webhook_secret_env": "GITHUB_WEBHOOK_SECRET",
+  "bind": "127.0.0.1",
+  "port": 8788,
+  "debounce_seconds": 20,
+  "poll_interval_seconds": 120,
+  "reconcile_interval_seconds": 600,
+  "auto_execute": true,
+  "max_payload_bytes": 262144
+}
