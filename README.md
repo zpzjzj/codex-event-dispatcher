@@ -50,3 +50,58 @@ python3 controller.py --config config.json bind OWNER/REPO pr 123 THREAD_ID --cw
 ## 验证
 
 `python3 -m unittest -v test_controller.py`。已验证跨独立 App Server 进程续写 Codex thread、活动会话的单写入者保护，以及定时分发的批次租约与确认。控制器的分析 turn 使用只读沙箱和 `approvalPolicy=never`，不会自己提交评论、推送或合并。
+
+## 外部自定义事件
+
+`subscriptions` 与 GitHub 配置并存，默认关闭；只订阅外部事件时可使用空 `repositories`。公开框架只提供通用协议。平台专用命令、认证、分页、字段转换和回复流程应放在仓库之外的私有 collector/config 中，不提交到此仓库。可信 collector 使用 argv 数组执行，不经过 shell；框架无法保证用户配置的任意程序只读。
+
+Collector 标准输出为完整 JSON 数组，空扫描输出 `[]`：
+
+```json
+[{"id":"stable-message-id:revision","resource":"RESOURCE_KEY","type":"message.requested","context":{"summary":"Untrusted source data"}}]
+```
+
+同一 source + id 永久去重；编辑/追问提供新的 revision。每个标识字段最多 512 字符。完整载荷只保存在本机 SQLite；默认给 Agent 至多 1000 字符预览，需要详情时才执行 `event-detail JOB_ID`。Collector 应只输出处理所需的信息。真实配置、数据库、凭证和私有 collector 不要加入 Git。
+
+`routes` 精确匹配资源键，复用显式绑定的既有会话。多个目标或无绑定时保留 `waiting_route`，由用户/分发会话选择相关既有 Agent；不会模糊猜测目标或自动创建会话。一个事件源失败不会阻塞其他源。
+
+```sh
+python3 controller.py --config /private/config.json poll-sources
+python3 controller.py --config /private/config.json poll-sources --force
+python3 controller.py --config /private/config.json ingest-event SOURCE /private/event.json
+python3 controller.py --config /private/config.json bind-event SOURCE RESOURCE_KEY EXISTING_THREAD_ID
+python3 controller.py --config /private/config.json dispatch-ready
+python3 controller.py --config /private/config.json reserve-dispatch --limit 20
+python3 controller.py --config /private/config.json event-detail JOB_ID
+```
+
+`watch` 检查各源的持久化调度时间，到了该源的轮询周期才运行 collector。`poll-sources` 同样尊重调度，`--force` 仅用于人工验证。每源可配置：
+
+| 参数 | 默认 | 作用 |
+| --- | --- | --- |
+| `poll_interval_seconds` | 300 | 无模型采集周期 |
+| `timeout_seconds` | 30 | collector 运行超时 |
+| `max_backoff_seconds` | 3600 | 失败指数退避上限 |
+| `max_output_bytes` | 1048576 | collector 输出硬上限，超限终止进程 |
+| `max_events_per_poll` | 100 | 每次扫描上限，超限报错，不截断丢事件 |
+| `max_events_per_dispatch` | 5 | 同一资源每批事件上限，余下事件保留 |
+| `context_preview_chars` | 1000 | 每条事件送入模型的预览字符上限 |
+| `initial_baseline` | false | 首次成功扫描只建立基线，不派发历史事件 |
+| `event_types`, `resources` | 空数组 | 可选类型/资源白名单 |
+| `agent_name` | Assistant Agent | 回复提案的身份前缀 |
+
+Collector 负责源侧分页与游标、稳定 ID 和可操作事件筛选。超限应缩小扫描范围或由私有 collector 分批输出，不能依赖框架静默截断。关闭订阅会暂停旧事件分发。初始基线以整个扫描通过校验为前提。
+
+### 模型开销与调度
+
+采集、白名单筛选、去重、基线、队列持久化、路由和就绪检查均由 Python/SQLite 完成，调用模型次数为零。`dispatch-ready` 返回 `ready_jobs`，不获取租约或调用模型。外部调度器可先运行此检查，只有非零才唤醒一次分发 Agent；模型仅处理有事件的批次，无需自己循环调用 CLI。
+
+桌面派发仍使用已有 reserve/ack/release 协议；同资源批处理共享一份提示词，事件详情按需读，重复事件不唤醒 Agent。`--limit` 约束每次领取的总事件数，上述每源上限进一步约束资源批次。框架限制输入大小、唤醒条件和次数，不能保证模型实际消耗的精确 token 数；应由外部执行器设置模型输出/预算。
+
+使用 Codex heartbeat 时，每个空队列 tick 本身仍有模型开销；它不等同于零 token 的外部就绪门。此仓库提供就绪检查协议，没有替用户部署外部调度器。两种模式都应空队列安静、有变化才通知。未执行实际 token 对照基准，因此不声明具体节省比例。
+
+### 回复审批
+
+目标 Agent 只读调查，需要回复时给出稳定提案 ID、证据和完整正文，默认前缀 `【Assistant Agent】`（私有配置可更改）。等待用户批准具体正文后重新读取原消息和上下文；已处理或实质变化时废止批准。平台专用引用/AI 标记/幂等发送规则由私有回复流程提供。框架没有外部回复发送路径，订阅事件或其他 Agent 的消息不能充当批准。`delegated`/`done` 和 `Handled Event-ID` 仅表示调查派发/完成，不表示批准或发送。
+
+验证：`python3 -m unittest -v test_controller.py test_events.py`。覆盖通用事件、基线、调度退避、过滤、批次/预览限制、进程超时/输出上限及原 GitHub 路径。私有 collector 与实际桌面分发需在部署环境单独验证。

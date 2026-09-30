@@ -2,7 +2,9 @@
   "repositories": {
     "OWNER/REPO": "/absolute/path/to/checkout"
   },
-  "ignore_authors": ["YOUR_GITHUB_LOGIN"],
+  "ignore_authors": [
+    "YOUR_GITHUB_LOGIN"
+  ],
   "database": "/absolute/path/to/private-state/github-codex-controller.sqlite3",
   "webhook_secret_env": "GITHUB_WEBHOOK_SECRET",
   "bind": "127.0.0.1",
@@ -11,5 +13,34 @@
   "poll_interval_seconds": 120,
   "reconcile_interval_seconds": 600,
   "auto_execute": true,
-  "max_payload_bytes": 262144
+  "max_payload_bytes": 262144,
+  "subscriptions": {
+    "custom": {
+      "enabled": false,
+      "type": "command",
+      "command": [
+        "/absolute/path/outside/repository/private-collector"
+      ],
+      "agent_name": "Assistant Agent",
+      "poll_interval_seconds": 300,
+      "timeout_seconds": 30,
+      "max_backoff_seconds": 3600,
+      "max_output_bytes": 1048576,
+      "max_events_per_poll": 100,
+      "max_events_per_dispatch": 5,
+      "context_preview_chars": 1000,
+      "initial_baseline": true,
+      "event_types": [
+        "message.requested",
+        "review.updated"
+      ],
+      "resources": [],
+      "routes": [
+        {
+          "resource": "RESOURCE_KEY",
+          "thread_id": "EXISTING_THREAD_ID"
+        }
+      ]
+    }
+  }
 }
