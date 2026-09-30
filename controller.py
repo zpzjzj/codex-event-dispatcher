@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""GitHub webhook inbox that routes read-only triage to Codex threads.
+"""Persistent event inbox that routes read-only triage to Codex threads.
 
-The controller never publishes GitHub content. A human continues the Codex
+The dispatcher never publishes external content. A human continues the Codex
 thread to approve and publish a proposed response.
 """
 
 from __future__ import annotations
 
 import argparse
+import events
 from contextlib import closing
 import hashlib
 import hmac
@@ -85,7 +86,7 @@ def database(path: str) -> sqlite3.Connection:
     db = sqlite3.connect(path, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
-    db.executescript(SCHEMA)
+    db.executescript(SCHEMA + events.SCHEMA)
     columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
     for name, ddl in (("retry_after", "INTEGER NOT NULL DEFAULT 0"),
                       ("event_at", "INTEGER NOT NULL DEFAULT 0"),
@@ -118,8 +119,9 @@ def github_time(value: str | None, fallback: int) -> int:
 
 def config(path: str) -> dict:
     raw = json.loads(Path(path).read_text())
-    repos = raw.get("repositories")
-    if not isinstance(repos, dict) or not repos:
+    repos = raw.setdefault("repositories", {})
+    events.subscriptions(raw)
+    if not isinstance(repos, dict) or (not repos and not raw.get("subscriptions")):
         raise ValueError("repositories must map owner/repo to an absolute checkout path")
     for repo, cwd in repos.items():
         if repo.count("/") != 1 or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
@@ -427,7 +429,7 @@ class Codex:
         threading.Thread(target=self._read, daemon=True).start()
         self.next_id = 0
         self.call("initialize", {"clientInfo": {
-            "name": "github-codex-controller", "title": "GitHub event controller", "version": "0.1.0"
+            "name": "codex-event-dispatcher", "title": "Codex event dispatcher", "version": "0.1.0"
         }})
         self._send({"method": "initialized", "params": {}})
 
@@ -489,7 +491,7 @@ class Codex:
         else:
             thread_id = self.call("thread/start", {
                 "cwd": cwd, "model": model, "approvalPolicy": "never", "sandbox": "read-only",
-                "serviceName": "github-codex-controller",
+                "serviceName": "codex-event-dispatcher",
             })["thread"]["id"]
         result = self.call("turn/start", {
             "threadId": thread_id, "input": [{"type": "text", "text": prompt}],
@@ -583,11 +585,15 @@ def reserve_dispatch(db: sqlite3.Connection, cfg: dict, limit: int = 20) -> list
         groups.setdefault((row['repo'], row['kind'], row['number']), []).append(row)
     batches = []
     for (repo, kind, number), rows in groups.items():
+        if kind == "external" and not cfg.get("subscriptions", {}).get(repo[6:], {}).get("enabled", False):
+            continue
         binding = db.execute("SELECT thread_id FROM bindings WHERE repo=? AND kind=? AND number=?",
                              (repo, kind, number)).fetchone()
         if not binding:
             continue
         thread_id = binding['thread_id']
+        if kind == "external":
+            rows = rows[:cfg["subscriptions"][repo[6:]].get("max_events_per_dispatch", 5)]
         ready = []
         for row in rows:
             observed = session_event_state(row, thread_id, cfg)
@@ -618,7 +624,7 @@ def reserve_dispatch(db: sqlite3.Connection, cfg: dict, limit: int = 20) -> list
             raise
         batches.append({'repo': repo, 'kind': kind, 'number': number,
                         'thread_id': thread_id, 'job_ids': ids,
-                        'prompt': dispatch_prompt(ready)})
+                        'prompt': (events.prompt(db, ready, cfg) if kind == 'external' else dispatch_prompt(ready))})
     return batches
 
 
@@ -714,7 +720,7 @@ def session_event_state(job: sqlite3.Row, thread_id: str, cfg: dict) -> str | No
         if job["delivery_id"] in content:
             if not turn["completed"]:
                 return "processing"
-            if job["delivery_id"] in (turn["text"][-1] if turn["text"] else ""):
+            if (("Handled Event-ID: " + job["delivery_id"]) if job["kind"] == "external" else job["delivery_id"]) in (turn["text"][-1] if turn["text"] else ""):
                 return "handled"
         if source_ids and turn["completed"] and turn["completed"] >= event_at and all(
             any(marker in content for marker in (f"discussion_r{source_id}",
@@ -755,7 +761,7 @@ def settle_delegated(db: sqlite3.Connection, cfg: dict) -> int:
 
 def notify_user(repo: str, kind: str, number: int, outcome: str):
     """Best-effort local notification; the full proposal stays in Codex."""
-    title = "GitHub → Codex"
+    title = "Codex Event Dispatcher"
     body = f"{repo} {kind} #{number}: {outcome}"
     script = "display notification " + json.dumps(body) + " with title " + json.dumps(title)
     try:
@@ -928,6 +934,18 @@ def main():
     commands.add_parser("reconcile")
     commands.add_parser("settle-delegated")
     commands.add_parser("poll-once")
+    source_poll = commands.add_parser("poll-sources")
+    source_poll.add_argument("--force", action="store_true", help="ignore persisted source polling schedule")
+    commands.add_parser("dispatch-ready", help="deterministic readiness check; no model or lease")
+    detail = commands.add_parser("event-detail", help="read full locally stored external payload on demand")
+    detail.add_argument("job_id", type=int)
+    ingest = commands.add_parser("ingest-event")
+    ingest.add_argument("source")
+    ingest.add_argument("path", help="local JSON event file")
+    event_bind = commands.add_parser("bind-event")
+    event_bind.add_argument("source")
+    event_bind.add_argument("resource")
+    event_bind.add_argument("thread_id")
     args = parser.parse_args()
     cfg = config(args.config)
     db = database(cfg.get("database", str(Path(args.config).with_suffix(".sqlite3"))))
@@ -936,7 +954,33 @@ def main():
         if recovered:
             print(f"{recovered} interrupted jobs need inspection", flush=True)
 
-    if args.command == "bind":
+    if args.command == "ingest-event":
+        print(json.dumps({"new_jobs": events.ingest(db, cfg, args.source, json.loads(Path(args.path).read_text()))}))
+    elif args.command == "poll-sources":
+        print(json.dumps(events.poll(db, cfg, args.force)))
+    elif args.command == "dispatch-ready":
+        rows = db.execute("SELECT j.repo,j.kind FROM jobs j JOIN bindings b "
+                          "ON j.repo=b.repo AND j.kind=b.kind AND j.number=b.number "
+                          "WHERE j.state='waiting_desktop' AND j.retry_after<=?", (int(time.time()),)).fetchall()
+        count = sum(row["kind"] != "external" or cfg.get("subscriptions", {}).get(
+                    row["repo"][6:], {}).get("enabled", False) for row in rows)
+        print(json.dumps({"ready_jobs": count}))
+    elif args.command == "event-detail":
+        row = db.execute("SELECT payload FROM event_payloads WHERE job_id=?", (args.job_id,)).fetchone()
+        if not row:
+            parser.error("external event not found")
+        print(row["payload"])
+    elif args.command == "bind-event":
+        if args.source not in events.subscriptions(cfg):
+            parser.error("unknown source")
+        client = Codex(cfg.get("codex_command", "codex"))
+        try:
+            thread = client.call("thread/read", {"threadId": args.thread_id, "includeTurns": False})["thread"]
+        finally:
+            client.close()
+        events.bind(db, args.source, args.resource, args.thread_id, thread.get("cwd", ""))
+        print(json.dumps({"bound": args.thread_id}))
+    elif args.command == "bind":
         if args.repo not in cfg["repositories"]:
             parser.error("repository is not in the allowlist")
         client = Codex(cfg.get("codex_command", "codex"))
@@ -1084,6 +1128,9 @@ def main():
                         try:
                             with closing(database(cfg.get("database", str(Path(args.config).with_suffix(".sqlite3"))))) as scan_db:
                                 print(f"poll: {poll_items(scan_db, cfg)} new jobs", flush=True)
+                                external = events.poll(scan_db, cfg)
+                                if external["new_jobs"] or external["errors"]:
+                                    print(json.dumps({"subscriptions": external}), flush=True)
                                 settled = settle_delegated(scan_db, cfg)
                                 if settled:
                                     print(f"settled {settled} delegated jobs", flush=True)
