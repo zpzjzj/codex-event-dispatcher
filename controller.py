@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""GitHub webhook inbox that routes read-only triage to Codex threads.
+"""Persistent event inbox that routes read-only triage to Codex threads.
 
-The controller never publishes GitHub content. A human continues the Codex
+The dispatcher never publishes external content. A human continues the Codex
 thread to approve and publish a proposed response.
 """
 
@@ -429,7 +429,7 @@ class Codex:
         threading.Thread(target=self._read, daemon=True).start()
         self.next_id = 0
         self.call("initialize", {"clientInfo": {
-            "name": "github-codex-controller", "title": "GitHub event controller", "version": "0.1.0"
+            "name": "codex-event-dispatcher", "title": "Codex event dispatcher", "version": "0.1.0"
         }})
         self._send({"method": "initialized", "params": {}})
 
@@ -491,7 +491,7 @@ class Codex:
         else:
             thread_id = self.call("thread/start", {
                 "cwd": cwd, "model": model, "approvalPolicy": "never", "sandbox": "read-only",
-                "serviceName": "github-codex-controller",
+                "serviceName": "codex-event-dispatcher",
             })["thread"]["id"]
         result = self.call("turn/start", {
             "threadId": thread_id, "input": [{"type": "text", "text": prompt}],
@@ -761,7 +761,7 @@ def settle_delegated(db: sqlite3.Connection, cfg: dict) -> int:
 
 def notify_user(repo: str, kind: str, number: int, outcome: str):
     """Best-effort local notification; the full proposal stays in Codex."""
-    title = "GitHub → Codex"
+    title = "Codex Event Dispatcher"
     body = f"{repo} {kind} #{number}: {outcome}"
     script = "display notification " + json.dumps(body) + " with title " + json.dumps(title)
     try:

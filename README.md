@@ -1,10 +1,12 @@
-# GitHub → Codex 本机控制器
+# Codex Event Dispatcher
 
-本机 Python 控制器用 `gh` 无模型轮询配置的 GitHub 仓库，并检查开放 PR 的冲突、评审和 CI 变化。事件写入持久队列后，由 Codex 做只读初步分析；用户确认具体回复后，Codex 才可按用户指示向 GitHub 发布。DeepSeek Harness 不参与调用或执行。
+本机事件采集与持久队列，面向 Codex 既有会话分发只读调查任务。采集、筛选、去重和路由不调用模型；只在有待处理事件时派发。GitHub 是内置事件源，其他来源通过仓库外的私有 collector 和配置接入。需要回复时先拟稿，用户确认具体正文后再由 Agent 按对应私有流程发布。
 
-**一句 prompt 启用定时分发：**在本仓库目录打开一个专用 Codex 会话，发送：“请按本仓库的 `DISPATCHER.md`，为这个会话启用每 10 分钟检查本地队列的 GitHub → Codex 定时分发，并先验证一次定时运行能把 Event-ID 送到原 PR 会话；空队列保持安静，GitHub 回复前让我确认。”
+**一句 prompt 启用定时分发：**在本仓库目录打开一个专用 Codex 会话，发送：“请按本仓库的 `DISPATCHER.md`，为这个会话启用每 10 分钟检查本地事件队列的 Codex 定时分发，并先验证一次运行能把 Event-ID 送到已绑定的目标会话；空队列保持安静，外部回复前让我确认。”
 
-这句 prompt 会要求 Codex 创建附着于当前专用会话的 heartbeat；具体领取、发送、确认与失败重试协议见 [DISPATCHER.md](DISPATCHER.md)。定时运行本身仍消耗少量模型 token；GitHub 轮询和队列去重不使用模型。当前项目的 `config.json` 是本机私有配置，不应提交到仓库；新安装从 `config.example.json` 复制并填写仓库白名单、checkout、GitHub 登录名和数据库路径。
+具体领取、发送、确认与失败重试协议见 [DISPATCHER.md](DISPATCHER.md)。Heartbeat 每次检查仍消耗模型 token；更轻量的部署可由外部调度器先执行无模型的 `dispatch-ready`，只在队列非空时唤醒分发会话。`config.json` 是本机私有配置，不应提交；从 `config.example.json` 复制，按需配置 GitHub 仓库、通用订阅与数据库路径。
+
+## 内置 GitHub 事件源
 
 配置在 `config.json`，`repositories` 是可编辑的仓库白名单和默认 checkout 映射，`ignore_authors` 用于忽略本人发出的评论与评审。首次轮询和首次 PR 状态检查只建立基线，不补发全部历史事件。事件先持久写入 SQLite，再由工作线程取出；控制器重启后队列仍在。GitHub delivery ID 或更新时间用于去重，同一 issue/PR 的密集事件会合并为最新的一条。轮询会核对 PR 内容、HEAD 和评论时间，避免仅因本人回复而再次唤醒 Codex。
 
@@ -31,8 +33,8 @@ python3 controller.py --config config.json watch
 macOS 可用 LaunchAgent 持续运行 `watch`；个人安装路径和配置不要提交到仓库。若升级 Python、Node 或移动本目录，需要更新 LaunchAgent 的路径并重新加载。以下命令使用示例服务名，请按实际名称替换：
 
 ```sh
-launchctl print gui/$(id -u)/com.example.github-codex-controller
-launchctl bootout gui/$(id -u)/com.example.github-codex-controller
+launchctl print gui/$(id -u)/com.example.codex-event-dispatcher
+launchctl bootout gui/$(id -u)/com.example.codex-event-dispatcher
 ```
 
 ## 绑定已有会话

@@ -5,7 +5,7 @@
   "ignore_authors": [
     "YOUR_GITHUB_LOGIN"
   ],
-  "database": "/absolute/path/to/private-state/github-codex-controller.sqlite3",
+  "database": "/absolute/path/to/private-state/codex-event-dispatcher.sqlite3",
   "webhook_secret_env": "GITHUB_WEBHOOK_SECRET",
   "bind": "127.0.0.1",
   "port": 8788,
