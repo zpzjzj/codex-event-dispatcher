@@ -297,6 +297,24 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(reserve_dispatch(self.db, cfg), [])
         self.assertEqual(self.db.execute("SELECT state FROM jobs").fetchone()[0], "waiting_desktop")
 
+    def test_aborted_turn_does_not_block_future_events_or_claim_handling(self):
+        accept(self.db, {self.repo: self.temp.name}, "delivery-abort", "pull_request", self.payload)
+        row = self.db.execute("SELECT * FROM jobs").fetchone()
+        sessions = Path(self.temp.name) / "sessions"
+        sessions.mkdir()
+        now = int(time.time())
+        record = sessions / "rollout-test-original-thread.jsonl"
+        record.write_text("\n".join(json.dumps(e) for e in [
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "aborted", "started_at": now}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "delivery-abort review comments"}],
+             "internal_chat_message_metadata_passthrough": {"turn_id": "aborted"}}},
+            {"type": "event_msg", "payload": {"type": "turn_aborted", "turn_id": "aborted",
+             "completed_at": now, "last_agent_message": "Handled Event-ID: delivery-abort"}},
+        ]) + "\n")
+        cfg = {"sessions_root": str(sessions)}
+        self.assertIsNone(session_event_state(row, "original-thread", cfg))
+
     def test_existing_pr_session_lookup_uses_python(self):
         sessions = Path(self.temp.name) / "sessions"
         sessions.mkdir()

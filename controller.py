@@ -674,7 +674,7 @@ def session_event_state(job: sqlite3.Row, thread_id: str, cfg: dict) -> str | No
     for path in sorted(paths):
         with path.open(errors="replace") as stream:
             for line in stream:
-                if not any(word in line for word in ('"task_started"', '"task_complete"', '"response_item"')):
+                if not any(word in line for word in ('"task_started"', '"task_complete"', '"turn_aborted"', '"response_item"')):
                     continue
                 try:
                     event = json.loads(line)
@@ -686,13 +686,13 @@ def session_event_state(job: sqlite3.Row, thread_id: str, cfg: dict) -> str | No
                     if turn_id:
                         turns.setdefault(turn_id, {"started": 0, "completed": 0, "failed": False,
                                                    "text": []})["started"] = int(payload.get("started_at") or 0)
-                elif event.get("type") == "event_msg" and payload.get("type") == "task_complete":
+                elif event.get("type") == "event_msg" and payload.get("type") in ("task_complete", "turn_aborted"):
                     turn_id = payload.get("turn_id")
                     if turn_id:
                         turn = turns.setdefault(turn_id, {"started": 0, "completed": 0,
                                                           "failed": False, "text": []})
                         turn["completed"] = int(payload.get("completed_at") or 0)
-                        turn["failed"] = bool(payload.get("error") or payload.get("status") in
+                        turn["failed"] = bool(payload.get("type") == "turn_aborted" or payload.get("error") or payload.get("status") in
                                               ("failed", "interrupted", "cancelled"))
                         turn["text"].append(str(payload.get("last_agent_message") or "")[:20000])
                 elif event.get("type") == "response_item" and payload.get("type") in ("message", "custom_tool_call"):
